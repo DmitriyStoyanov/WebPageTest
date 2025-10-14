@@ -562,5 +562,10 @@ if (!function_exists('GuzzleHttp\describe_type')) {
     require __DIR__ . '/GuzzleHttp/functions.php';
 }
 require __DIR__ . '/GuzzleHttp/Psr7/functions.php';
-require __DIR__ . '/GuzzleHttp/Promise/functions.php';
+
+// Only load GuzzleHttp Promise functions if they haven't been loaded already
+// This prevents conflicts with vendor GuzzleHttp Promise
+if (!function_exists('GuzzleHttp\Promise\queue')) {
+    require __DIR__ . '/GuzzleHttp/Promise/functions.php';
+}
 require __DIR__ . '/JmesPath/JmesPath.php';
