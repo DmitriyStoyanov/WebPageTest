@@ -555,7 +555,12 @@ spl_autoload_register(function ($class) use ($mapping) {
 }, true);
 
 require __DIR__ . '/Aws/functions.php';
-require __DIR__ . '/GuzzleHttp/functions.php';
+
+// Only load GuzzleHttp functions if they haven't been loaded already
+// This prevents conflicts with vendor GuzzleHttp
+if (!function_exists('GuzzleHttp\describe_type')) {
+    require __DIR__ . '/GuzzleHttp/functions.php';
+}
 require __DIR__ . '/GuzzleHttp/Psr7/functions.php';
 require __DIR__ . '/GuzzleHttp/Promise/functions.php';
 require __DIR__ . '/JmesPath/JmesPath.php';

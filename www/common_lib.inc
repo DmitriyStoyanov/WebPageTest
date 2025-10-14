@@ -2170,7 +2170,11 @@ function LoadJobQueue($workDir, &$queue)
             if (!isset($queue) && !GetSetting('beanstalkd')) {
               // build the queue from disk (files will be sortable by the order they were submitted)
                 $files = scandir($workDir);
-                sort($files);
+                if ($files !== false && is_array($files)) {
+                    sort($files);
+                } else {
+                    $files = array();
+                }
 
               // now add them to the various priority queues
                 $queue = array();
