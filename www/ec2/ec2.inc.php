@@ -6,6 +6,15 @@ require_once('./common_lib.inc');
 require_once('../vendor/autoload.php');
 
 /**
+* Ensure the tmp directory exists for EC2 instance data
+*/
+function EC2_EnsureTmpDir() {
+  if (!is_dir('./tmp')) {
+    mkdir('./tmp', 0777, true);
+  }
+}
+
+/**
 * Tests are pending for the given location, start instances as necessary
 *
 * @param mixed $location
@@ -15,9 +24,12 @@ function EC2_StartInstanceIfNeeded($ami) {
   $needed = false;
   $lock = Lock('ec2-instances', true, 120);
   if ($lock) {
-    $instances = json_decode(file_get_contents('./tmp/ec2-instances.dat'), true);
-    if (!$instances || !is_array($instances))
-      $instances = array();
+    $instances = array();
+    if (file_exists('./tmp/ec2-instances.dat')) {
+      $instances = json_decode(file_get_contents('./tmp/ec2-instances.dat'), true);
+      if (!$instances || !is_array($instances))
+        $instances = array();
+    }
     if (!isset($instances[$ami]))
       $instances[$ami] = array();
     if (!isset($instances[$ami]['count']) || !is_numeric($instances[$ami]['count']))
@@ -27,6 +39,7 @@ function EC2_StartInstanceIfNeeded($ami) {
     if ($needed) {
       if (EC2_StartInstance($ami)) {
         $instances[$ami]['count']++;
+        EC2_EnsureTmpDir();
         file_put_contents('./tmp/ec2-instances.dat', json_encode($instances));
       }
     }
@@ -230,9 +243,12 @@ function EC2_TerminateIdleInstances() {
     // update the running instance counts
     $lock = Lock('ec2-instances', true, 120);
     if ($lock) {
-      $counts = json_decode(file_get_contents('./tmp/ec2-instances.dat'), true);
-      if (!isset($counts) || !is_array($counts))
-        $counts = array();
+      $counts = array();
+      if (file_exists('./tmp/ec2-instances.dat')) {
+        $counts = json_decode(file_get_contents('./tmp/ec2-instances.dat'), true);
+        if (!isset($counts) || !is_array($counts))
+          $counts = array();
+      }
       foreach ($counts as $ami => $count) {
         if (!isset($counts[$ami]))
           $counts[$ami] = array('count' => 0);
@@ -243,6 +259,7 @@ function EC2_TerminateIdleInstances() {
           $counts[$ami] = array('count' => 0);
         $counts[$ami]['count'] = $count['count'];
       }
+      EC2_EnsureTmpDir();
       file_put_contents('./tmp/ec2-instances.dat', json_encode($counts));
       Unlock($lock);
     }
@@ -316,9 +333,12 @@ function EC2_SendInstancesOffline() {
 function EC2_StartNeededInstances() {
   $lock = Lock('ec2-instances', true, 120);
   if ($lock) {
-    $instances = json_decode(file_get_contents('./tmp/ec2-instances.dat'), true);
-    if (!$instances || !is_array($instances))
-      $instances = array();
+    $instances = array();
+    if (file_exists('./tmp/ec2-instances.dat')) {
+      $instances = json_decode(file_get_contents('./tmp/ec2-instances.dat'), true);
+      if (!$instances || !is_array($instances))
+        $instances = array();
+    }
     $locations = EC2_GetAMILocations();
     $scaleFactor = GetSetting('EC2.ScaleFactor');
     if (!$scaleFactor)
@@ -398,6 +418,7 @@ function EC2_StartNeededInstances() {
       }
     }
 
+    EC2_EnsureTmpDir();
     file_put_contents('./tmp/ec2-instances.dat', json_encode($instances));
     Unlock($lock);
   }
@@ -546,6 +567,7 @@ function EC2_GetRunningInstances() {
           $amis[$instance['ami']]['count']++;
         }
       }
+      EC2_EnsureTmpDir();
       file_put_contents('./tmp/ec2-instances.dat', json_encode($amis));
       Unlock($lock);
     }
