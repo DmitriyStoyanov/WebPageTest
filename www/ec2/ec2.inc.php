@@ -3,7 +3,7 @@
 // Use of this source code is governed by the Polyform Shield 1.0.0 license that can be
 // found in the LICENSE.md file.
 require_once('./common_lib.inc');
-require_once('./lib/aws_v3/aws-autoloader.php');
+require_once('../vendor/autoload.php');
 
 /**
 * Tests are pending for the given location, start instances as necessary
