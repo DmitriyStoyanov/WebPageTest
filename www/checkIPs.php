@@ -16,6 +16,7 @@ if (isset($_GET["days"])) {
 }
 
 $whitelist = array();
+$wl = array();
 if (file_exists('./settings/server/whitelist.txt')) {
     $wl = file('./settings/server/whitelist.txt', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
 } elseif (file_exists('./settings/common/whitelist.txt')) {
@@ -23,6 +24,12 @@ if (file_exists('./settings/server/whitelist.txt')) {
 } else {
     $wl = file('./settings/whitelist.txt', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
 }
+// Ensure $wl is an array before using it
+if ($wl === false) {
+    $wl = array();
+}
+
+$blockIps = array();
 if (file_exists('./settings/server/blockip.txt')) {
     $blockIps = file('./settings/server/blockip.txt', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
 } elseif (file_exists('./settings/common/blockip.txt')) {
@@ -30,6 +37,11 @@ if (file_exists('./settings/server/blockip.txt')) {
 } else {
     $blockIps = file('./settings/blockip.txt', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
 }
+// Ensure $blockIps is an array before using it
+if ($blockIps === false) {
+    $blockIps = array();
+}
+
 foreach ($wl as &$w) {
     $parts = explode(" ", $w);
     $ip = trim($parts[0]);
