@@ -1918,7 +1918,7 @@ final class S3Request
 			elseif ($header == 'Content-Type')
 				$this->response->headers['type'] = $value;
 			elseif ($header == 'ETag')
-				$this->response->headers['hash'] = $value{0} == '"' ? substr($value, 1, -1) : $value;
+				$this->response->headers['hash'] = $value[0] == '"' ? substr($value, 1, -1) : $value;
 			elseif (preg_match('/^x-amz-meta-.*$/', $header))
 				$this->response->headers[$header] = is_numeric($value) ? (int)$value : $value;
 		}
@@ -1935,4 +1935,3 @@ class S3Exception extends Exception {
 		$this->line = $line;
 	}
 }
-
