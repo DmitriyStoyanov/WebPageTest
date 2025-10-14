@@ -1880,11 +1880,11 @@ final class S3Request
 	/**
 	* CURL write callback
 	*
-	* @param resource &$curl CURL resource
+	* @param resource $curl CURL resource
 	* @param string $data Data
 	* @return integer
 	*/
-	private function __responseWriteCallback(&$curl, $data)
+	private function __responseWriteCallback($curl, $data)
 	{
 		if (in_array($this->response->code, array(200, 206)) && $this->fp !== false)
 			return fwrite($this->fp, $data);
@@ -1897,11 +1897,11 @@ final class S3Request
 	/**
 	 * CURL header callback
 	 *
-	 * @param resource &$curl CURL resource
+	 * @param resource $curl CURL resource
 	 * @param string $data Data
 	 * @return integer
 	 */
-	private function __responseHeaderCallback(&$curl, $data)
+	private function __responseHeaderCallback($curl, $data)
 	{
 		if (($strlen = strlen($data)) <= 2) return $strlen;
 		if (substr($data, 0, 4) == 'HTTP')
