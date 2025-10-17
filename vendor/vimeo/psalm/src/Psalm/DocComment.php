@@ -24,6 +24,7 @@ final class DocComment
         'assert', 'assert-if-true', 'assert-if-false', 'suppress',
         'ignore-nullable-return', 'override-property-visibility',
         'override-method-visibility', 'seal-properties', 'seal-methods',
+        'no-seal-properties', 'no-seal-methods',
         'ignore-falsable-return', 'variadic', 'pure',
         'ignore-variable-method', 'ignore-variable-property', 'internal',
         'taint-sink', 'taint-source', 'assert-untainted', 'scope-this',
@@ -33,18 +34,22 @@ final class DocComment
         'taint-unescape', 'self-out', 'consistent-constructor', 'stub-override',
         'require-extends', 'require-implements', 'param-out', 'ignore-var',
         'consistent-templates', 'if-this-is', 'this-out', 'check-type', 'check-type-exact',
-        'api',
+        'api', 'inheritors',
     ];
 
     /**
      * Parse a docblock comment into its parts.
      */
-    public static function parsePreservingLength(Doc $docblock): ParsedDocblock
+    public static function parsePreservingLength(Doc $docblock, bool $no_psalm_error = false): ParsedDocblock
     {
         $parsed_docblock = DocblockParser::parse(
             $docblock->getText(),
             $docblock->getStartFilePos(),
         );
+
+        if ($no_psalm_error) {
+            return $parsed_docblock;
+        }
 
         foreach ($parsed_docblock->tags as $special_key => $_) {
             if (strpos($special_key, 'psalm-') === 0) {

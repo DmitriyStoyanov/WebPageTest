@@ -41,7 +41,7 @@
         "amphp/php-cs-fixer-config": "dev-master",
         "react/promise": "^2",
         "phpunit/phpunit": "^7 | ^8 | ^9",
-        "psalm/phar": "^3.11@dev",
+        "vimeo/psalm": "^3.12",
         "jetbrains/phpstorm-stubs": "^2019.3"
     },
     "autoload": {
@@ -61,11 +61,6 @@
     "support": {
         "issues": "https://github.com/amphp/amp/issues",
         "irc": "irc://irc.freenode.org/amphp"
-    },
-    "extra": {
-        "branch-alias": {
-            "dev-master": "2.x-dev"
-        }
     },
     "scripts": {
         "test": "@php -dzend.assertions=1 -dassert.exception=1 ./vendor/bin/phpunit",

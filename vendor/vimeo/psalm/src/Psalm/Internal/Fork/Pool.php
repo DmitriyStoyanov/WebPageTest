@@ -48,11 +48,8 @@ use function strpos;
 use function substr;
 use function unserialize;
 use function usleep;
-use function version_compare;
 
 use const PHP_EOL;
-use const PHP_OS;
-use const PHP_VERSION;
 use const SIGALRM;
 use const SIGTERM;
 use const STREAM_IPPROTO_IP;
@@ -70,7 +67,7 @@ use const STREAM_SOCK_STREAM;
  *
  * @internal
  */
-class Pool
+final class Pool
 {
     private const EXIT_SUCCESS = 0;
     private const EXIT_FAILURE = 1;
@@ -83,21 +80,14 @@ class Pool
     /** @var resource[] */
     private array $read_streams = [];
 
-    private bool $did_have_error = false;
-
     /** @var ?Closure(mixed): void */
     private ?Closure $task_done_closure = null;
-
-    public const MAC_PCRE_MESSAGE = 'Mac users: pcre.jit is set to 1 in your PHP config.' . PHP_EOL
-        . 'The pcre jit is known to cause segfaults in PHP 7.3 on Macs, and Psalm' . PHP_EOL
-        . 'will not execute in threaded mode to avoid indecipherable errors.' . PHP_EOL
-        . 'Consider adding pcre.jit=0 to your PHP config, or upgrade to PHP 7.4.' . PHP_EOL
-        . 'Relevant info: https://bugs.php.net/bug.php?id=77260';
 
     /**
      * @param array<int, array<int, mixed>> $process_task_data_iterator
      * An array of task data items to be divided up among the
      * workers. The size of this is the number of forked processes.
+     * @phpcsSuppress SlevomatCodingStandard.TypeHints.ParameterTypeHint
      * @param Closure $startup_closure
      * A closure to execute upon starting a child
      * @param Closure(int, mixed):mixed $task_closure
@@ -138,16 +128,6 @@ class Pool
             echo "pcntl_fork() is disabled by php configuration (disable_functions directive).\n"
                 . "Please enable it or run Psalm single-threaded with --threads=1 cli switch.\n";
             exit(1);
-        }
-
-        if (ini_get('pcre.jit') === '1'
-            && PHP_OS === 'Darwin'
-            && version_compare(PHP_VERSION, '7.3.0') >= 0
-            && version_compare(PHP_VERSION, '7.4.0') < 0
-        ) {
-            die(
-                self::MAC_PCRE_MESSAGE . PHP_EOL
-            );
         }
 
         // We'll keep track of if this is the parent process
@@ -315,6 +295,20 @@ class Pool
         return $for_write;
     }
 
+    private function killAllChildren(): void
+    {
+        foreach ($this->child_pid_list as $child_pid) {
+            /**
+             * SIGTERM does not exist on windows
+             *
+             * @psalm-suppress UnusedPsalmSuppress
+             * @psalm-suppress UndefinedConstant
+             * @psalm-suppress MixedArgument
+             */
+            posix_kill($child_pid, SIGTERM);
+        }
+    }
+
     /**
      * Read the results that each child process has serialized on their write streams.
      * The results are returned in an array, one for each worker. The order of the results
@@ -337,6 +331,7 @@ class Pool
         $content = array_fill_keys(array_keys($streams), '');
 
         $terminationMessages = [];
+        $done = [];
 
         // Read the data off of all the stream.
         while (count($streams) > 0) {
@@ -379,34 +374,25 @@ class Pool
                         if ($message instanceof ForkProcessDoneMessage) {
                             $terminationMessages[] = $message->data;
                         } elseif ($message instanceof ForkTaskDoneMessage) {
+                            $done[(int)$file] = true;
                             if ($this->task_done_closure !== null) {
                                 ($this->task_done_closure)($message->data);
                             }
                         } elseif ($message instanceof ForkProcessErrorMessage) {
-                            // Kill all children
-                            foreach ($this->child_pid_list as $child_pid) {
-                                /**
-                                 * SIGTERM does not exist on windows
-                                 *
-                                 * @psalm-suppress UnusedPsalmSuppress
-                                 * @psalm-suppress UndefinedConstant
-                                 * @psalm-suppress MixedArgument
-                                 */
-                                posix_kill($child_pid, SIGTERM);
-                            }
+                            $this->killAllChildren();
                             throw new Exception($message->message);
                         } else {
-                            error_log('Child should return ForkMessage - response type=' . gettype($message));
-                            $this->did_have_error = true;
+                            $this->killAllChildren();
+                            throw new Exception('Child should return ForkMessage - response type=' . gettype($message));
                         }
                     }
                 }
 
                 // If the stream has closed, stop trying to select on it.
                 if (feof($file)) {
-                    if ($content[(int)$file] !== '') {
-                        error_log('Child did not send full message before closing the connection');
-                        $this->did_have_error = true;
+                    if ($content[(int)$file] !== '' || !isset($done[(int)$file])) {
+                        $this->killAllChildren();
+                        throw new Exception('Child did not send full message before closing the connection');
                     }
 
                     fclose($file);
@@ -468,21 +454,13 @@ class Pool
                      * @psalm-suppress UndefinedConstant
                      */
                     if ($term_sig !== SIGALRM) {
-                        $this->did_have_error = true;
-                        error_log("Child terminated with return code $return_code and signal $term_sig");
+                        $this->killAllChildren();
+                        throw new Exception("Child terminated with return code $return_code and signal $term_sig");
                     }
                 }
             }
         }
 
         return $content;
-    }
-
-    /**
-     * Returns true if this had an error, e.g. due to memory limits or due to a child process crashing.
-     */
-    public function didHaveError(): bool
-    {
-        return $this->did_have_error;
     }
 }

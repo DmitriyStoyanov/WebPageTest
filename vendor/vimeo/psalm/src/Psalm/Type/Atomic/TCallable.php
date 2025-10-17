@@ -5,14 +5,16 @@ namespace Psalm\Type\Atomic;
 use Psalm\Codebase;
 use Psalm\Internal\Analyzer\StatementsAnalyzer;
 use Psalm\Internal\Type\TemplateResult;
+use Psalm\Storage\FunctionLikeParameter;
 use Psalm\Type\Atomic;
+use Psalm\Type\Union;
 
 /**
  * Denotes the `callable` type. Can result from an `is_callable` check.
  *
  * @psalm-immutable
  */
-final class TCallable extends Atomic
+final class TCallable extends Atomic implements TCallableInterface
 {
     use CallableTrait;
 
@@ -20,6 +22,25 @@ final class TCallable extends Atomic
      * @var string
      */
     public $value;
+
+    /**
+     * Constructs a new instance of a generic type
+     *
+     * @param list<FunctionLikeParameter> $params
+     */
+    public function __construct(
+        string $value = 'callable',
+        ?array $params = null,
+        ?Union $return_type = null,
+        ?bool $is_pure = null,
+        bool $from_docblock = false
+    ) {
+        $this->value = $value;
+        $this->params = $params;
+        $this->return_type = $return_type;
+        $this->is_pure = $is_pure;
+        parent::__construct($from_docblock);
+    }
 
     /**
      * @param  array<lowercase-string, string> $aliased_classes

@@ -79,7 +79,7 @@ RUN ./configure \
 # Cleanup.
 RUN rm -rf /var/cache/apk/* /tmp/*
 
-FROM php:7.4-fpm-alpine
+FROM php:8.1-fpm-alpine
 ENV PATH=/opt/ffmpeg/bin:$PATH
 ENV PYTHONUNBUFFERED=1
 
@@ -156,7 +156,7 @@ RUN chmod 755 /scripts/* \
 # Might hang at gcc just delete current docker files and restart
 # INSTALLS XDEBUG
 RUN apk add --no-cache --virtual .build-deps $PHPIZE_DEPS \
-    && pecl install xdebug-3.0.0 \
+    && pecl install xdebug-3.1.0 \
     && docker-php-ext-enable xdebug \
     && apk del -f .build-deps
 

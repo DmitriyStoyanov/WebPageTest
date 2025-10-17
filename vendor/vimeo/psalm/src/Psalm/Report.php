@@ -74,7 +74,7 @@ abstract class Report
         if (!$report_options->show_info) {
             $this->issues_data = array_filter(
                 $issues_data,
-                static fn(IssueData $issue_data): bool => $issue_data->severity !== Config::REPORT_INFO,
+                static fn(IssueData $issue_data): bool => $issue_data->severity !== IssueData::SEVERITY_INFO,
             );
         } else {
             $this->issues_data = $issues_data;
@@ -97,4 +97,27 @@ abstract class Report
     }
 
     abstract public function create(): string;
+
+    /**
+     * @return array<string, self::TYPE_*>
+     */
+    public static function getMapping(): array
+    {
+        return [
+            'checkstyle.xml' => self::TYPE_CHECKSTYLE,
+            'sonarqube.json' => self::TYPE_SONARQUBE,
+            'codeclimate.json' => self::TYPE_CODECLIMATE,
+            'summary.json' => self::TYPE_JSON_SUMMARY,
+            'junit.xml' => self::TYPE_JUNIT,
+            '.xml' => self::TYPE_XML,
+            '.sarif.json' => self::TYPE_SARIF,
+            '.json' => self::TYPE_JSON,
+            '.txt' => self::TYPE_TEXT,
+            '.emacs' => self::TYPE_EMACS,
+            '.pylint' => self::TYPE_PYLINT,
+            '.console' => self::TYPE_CONSOLE,
+            '.sarif' => self::TYPE_SARIF,
+            'count.txt' => self::TYPE_COUNT,
+        ];
+    }
 }

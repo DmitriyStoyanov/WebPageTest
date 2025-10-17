@@ -5,6 +5,7 @@ namespace Psalm\Type;
 use InvalidArgumentException;
 use Psalm\CodeLocation;
 use Psalm\Codebase;
+use Psalm\Internal\Analyzer\Statements\Expression\ArrayAnalyzer;
 use Psalm\Internal\Analyzer\StatementsAnalyzer;
 use Psalm\Internal\Codebase\TaintFlowGraph;
 use Psalm\Internal\Codebase\VariableUseGraph;
@@ -20,6 +21,7 @@ use Psalm\Issue\TypeDoesNotContainNull;
 use Psalm\Issue\TypeDoesNotContainType;
 use Psalm\IssueBuffer;
 use Psalm\Storage\Assertion;
+use Psalm\Storage\Assertion\ArrayKeyDoesNotExist;
 use Psalm\Storage\Assertion\ArrayKeyExists;
 use Psalm\Storage\Assertion\Empty_;
 use Psalm\Storage\Assertion\Falsy;
@@ -45,6 +47,8 @@ use Psalm\Type\Atomic\TFalse;
 use Psalm\Type\Atomic\TInt;
 use Psalm\Type\Atomic\TKeyedArray;
 use Psalm\Type\Atomic\TList;
+use Psalm\Type\Atomic\TLiteralInt;
+use Psalm\Type\Atomic\TLiteralString;
 use Psalm\Type\Atomic\TMixed;
 use Psalm\Type\Atomic\TNamedObject;
 use Psalm\Type\Atomic\TNever;
@@ -64,11 +68,11 @@ use function count;
 use function explode;
 use function implode;
 use function is_numeric;
+use function is_string;
 use function key;
 use function ksort;
 use function preg_match;
 use function preg_quote;
-use function str_replace;
 use function str_split;
 use function strlen;
 use function strpos;
@@ -168,6 +172,7 @@ class Reconciler
             $has_negation = false;
             $has_isset = false;
             $has_inverted_isset = false;
+            $has_inverted_key_exists = false;
             $has_truthy_or_falsy_or_empty = false;
             $has_empty = false;
             $has_count_check = false;
@@ -197,7 +202,11 @@ class Reconciler
                     $is_equality = $is_equality
                         && $new_type_part_part instanceof IsIdentical;
 
-                    $has_inverted_isset = $has_inverted_isset || $new_type_part_part instanceof IsNotIsset;
+                    $has_inverted_isset = $has_inverted_isset
+                        || $new_type_part_part instanceof IsNotIsset;
+
+                    $has_inverted_key_exists = $has_inverted_key_exists
+                        || $new_type_part_part instanceof ArrayKeyDoesNotExist;
 
                     $has_count_check = $has_count_check
                         || $new_type_part_part instanceof NonEmptyCountable;
@@ -216,6 +225,7 @@ class Reconciler
                 $code_location,
                 $has_isset,
                 $has_inverted_isset,
+                $has_inverted_key_exists,
                 $has_empty,
                 $inside_loop,
                 $has_object_array_access,
@@ -329,7 +339,12 @@ class Reconciler
             if ($type_changed || $failed_reconciliation) {
                 $changed_var_ids[$key] = true;
 
-                if (substr($key, -1) === ']' && !$has_inverted_isset && !$has_empty && !$is_equality) {
+                if (substr($key, -1) === ']'
+                    && !$has_inverted_isset
+                    && !$has_inverted_key_exists
+                    && !$has_empty
+                    && !$is_equality
+                ) {
                     self::adjustTKeyedArrayType(
                         $key_parts,
                         $existing_types,
@@ -424,6 +439,10 @@ class Reconciler
     {
         foreach ($new_types as $nk => $type) {
             if (strpos($nk, '[') || strpos($nk, '->')) {
+                $type = array_values($type);
+                if (!isset($type[0][0])) {
+                    continue;
+                }
                 if ($type[0][0] instanceof IsEqualIsset
                     || $type[0][0] instanceof IsIsset
                     || $type[0][0] instanceof NonEmpty
@@ -452,9 +471,15 @@ class Reconciler
                             $array_key = array_shift($key_parts);
                             array_shift($key_parts);
 
+                            if ($array_key[0] === '\'' || $array_key[0] === '"') {
+                                $possibly_property_key = substr($array_key, 1, -1);
+                                $string_to_int = ArrayAnalyzer::getLiteralArrayKeyInt($possibly_property_key);
+                                $array_key = $string_to_int === false ? $array_key : $string_to_int;
+                            }
+
                             $new_base_key = $base_key . '[' . $array_key . ']';
 
-                            if (strpos($array_key, '\'') !== false) {
+                            if (is_string($array_key) && strpos($array_key, '\'') !== false) {
                                 $new_types[$base_key][] = [new HasStringArrayAccess()];
                             } else {
                                 $new_types[$base_key][] = [new HasIntOrStringArrayAccess()];
@@ -639,6 +664,7 @@ class Reconciler
         ?CodeLocation $code_location,
         bool $has_isset,
         bool $has_inverted_isset,
+        bool $has_inverted_key_exists,
         bool $has_empty,
         bool $inside_loop,
         bool &$has_object_array_access
@@ -714,11 +740,17 @@ class Reconciler
 
                             $new_base_type_candidate = $existing_key_type_part->type_params[1];
 
-                            if ($new_base_type_candidate->isMixed() && !$has_isset && !$has_inverted_isset) {
+                            if ($new_base_type_candidate->isMixed()
+                                && !$has_isset
+                                && !$has_inverted_isset
+                                && !$has_inverted_key_exists
+                            ) {
                                 return $new_base_type_candidate;
                             }
 
-                            if (($has_isset || $has_inverted_isset) && isset($new_assertions[$new_base_key])) {
+                            if (($has_isset || $has_inverted_isset || $has_inverted_key_exists)
+                                && isset($new_assertions[$new_base_key])
+                            ) {
                                 if ($has_inverted_isset && $new_base_key === $key) {
                                     $new_base_type_candidate = $new_base_type_candidate->getBuilder();
                                     $new_base_type_candidate->addType(new TNull);
@@ -747,7 +779,7 @@ class Reconciler
                         } elseif ($existing_key_type_part instanceof TString) {
                             $new_base_type_candidate = Type::getString();
                         } elseif ($existing_key_type_part instanceof TNamedObject
-                            && ($has_isset || $has_inverted_isset)
+                            && ($has_isset || $has_inverted_isset || $has_inverted_key_exists)
                         ) {
                             $has_object_array_access = true;
 
@@ -756,16 +788,20 @@ class Reconciler
                             return null;
                         } elseif (!$existing_key_type_part instanceof TKeyedArray) {
                             return Type::getMixed();
-                        } elseif ($array_key[0] === '$' || ($array_key[0] !== '\'' && !is_numeric($array_key[0]))) {
+                        } elseif ($array_key[0] === '$'
+                            || ($array_key[0] !== '\'' && ArrayAnalyzer::getLiteralArrayKeyInt($array_key) === false)) {
                             if ($has_empty) {
                                 return null;
                             }
 
-                            $new_base_type_candidate = $existing_key_type_part->getGenericValueType();
+                            $new_base_type_candidate = $existing_key_type_part->getGenericValueType(true);
                         } else {
                             $array_properties = $existing_key_type_part->properties;
 
-                            $key_parts_key = str_replace('\'', '', $array_key);
+                            $key_parts_key = $array_key;
+                            if ($array_key[0] === '\'' || $array_key[0] === '"') {
+                                $key_parts_key = substr($array_key, 1, -1);
+                            }
 
                             if (!isset($array_properties[$key_parts_key])) {
                                 if ($existing_key_type_part->fallback_params !== null) {
@@ -1101,88 +1137,109 @@ class Reconciler
             throw new UnexpectedValueException('Not expecting null array key');
         }
 
+        $array_key_offsets = [];
         if ($array_key[0] === '$') {
-            return;
+            if (!isset($existing_types[$array_key])) {
+                return;
+            }
+            $t = $existing_types[$array_key];
+            foreach ($t->getAtomicTypes() as $lit) {
+                if ($lit instanceof TLiteralInt || $lit instanceof TLiteralString) {
+                    $array_key_offsets []= $lit->value;
+                    continue;
+                }
+                return;
+            }
+        } else {
+            $array_key_offsets []= $array_key[0] === '\'' || $array_key[0] === '"'
+                ? substr($array_key, 1, -1)
+                : $array_key
+            ;
         }
-
-        $array_key_offset = $array_key[0] === '\'' || $array_key[0] === '"' ? substr($array_key, 1, -1) : $array_key;
 
         $base_key = implode($key_parts);
 
-        if (isset($existing_types[$base_key]) && $array_key_offset !== false) {
-            foreach ($existing_types[$base_key]->getAtomicTypes() as $base_atomic_type) {
-                if ($base_atomic_type instanceof TList) {
-                    $base_atomic_type = $base_atomic_type->getKeyedArray();
-                }
-                if ($base_atomic_type instanceof TKeyedArray
+        $result_type = $result_type->setPossiblyUndefined(
+            $result_type->possibly_undefined || count($array_key_offsets) > 1,
+        );
+
+        foreach ($array_key_offsets as $array_key_offset) {
+            if (isset($existing_types[$base_key]) && $array_key_offset !== false) {
+                foreach ($existing_types[$base_key]->getAtomicTypes() as $base_atomic_type) {
+                    if ($base_atomic_type instanceof TList) {
+                        $base_atomic_type = $base_atomic_type->getKeyedArray();
+                    }
+                    if ($base_atomic_type instanceof TKeyedArray
                     || ($base_atomic_type instanceof TArray
                         && !$base_atomic_type->isEmptyArray())
                     || $base_atomic_type instanceof TClassStringMap
-                ) {
-                    $new_base_type = $existing_types[$base_key];
+                    ) {
+                        $new_base_type = $existing_types[$base_key];
 
-                    if ($base_atomic_type instanceof TArray) {
-                        $fallback_key_type = $base_atomic_type->type_params[0];
-                        $fallback_value_type = $base_atomic_type->type_params[1];
+                        if ($base_atomic_type instanceof TArray) {
+                            $fallback_key_type = $base_atomic_type->type_params[0];
+                            $fallback_value_type = $base_atomic_type->type_params[1];
 
-                        $base_atomic_type = new TKeyedArray(
-                            [
+                            $base_atomic_type = new TKeyedArray(
+                                [
                                 $array_key_offset => $result_type,
-                            ],
-                            null,
-                            $fallback_key_type->isNever() ? null : [$fallback_key_type, $fallback_value_type],
-                        );
-                    } elseif ($base_atomic_type instanceof TClassStringMap) {
-                        // do nothing
-                    } else {
-                        $properties = $base_atomic_type->properties;
-                        $properties[$array_key_offset] = $result_type;
-                        if ($base_atomic_type->is_list
-                            && (!is_numeric($array_key_offset)
+                                ],
+                                null,
+                                $fallback_key_type->isNever() ? null : [$fallback_key_type, $fallback_value_type],
+                            );
+                        } elseif ($base_atomic_type instanceof TClassStringMap) {
+                            // do nothing
+                        } else {
+                            $properties = $base_atomic_type->properties;
+                            $properties[$array_key_offset] = $result_type;
+                            if ($base_atomic_type->is_list
+                            && (ArrayAnalyzer::getLiteralArrayKeyInt($array_key_offset) === false
                                 || ($array_key_offset
                                     && !isset($properties[$array_key_offset-1])
                                 )
                             )
-                        ) {
-                            if ($base_atomic_type->fallback_params && is_numeric($array_key_offset)) {
-                                $fallback = $base_atomic_type->fallback_params[1]->setPossiblyUndefined(
-                                    $result_type->isNever(),
-                                );
-                                for ($x = 0; $x < $array_key_offset; $x++) {
-                                    $properties[$x] ??= $fallback;
+                            ) {
+                                if ($base_atomic_type->fallback_params
+                                    && ArrayAnalyzer::getLiteralArrayKeyInt($array_key_offset) !== false) {
+                                    $fallback = $base_atomic_type->fallback_params[1]->setPossiblyUndefined(
+                                        $result_type->isNever(),
+                                    );
+                                    for ($x = 0; $x < $array_key_offset; $x++) {
+                                        $properties[$x] ??= $fallback;
+                                    }
+                                    ksort($properties);
+                                    $base_atomic_type = $base_atomic_type->setProperties($properties);
+                                } else {
+                                    // This should actually be a paradox
+                                    $base_atomic_type = new TKeyedArray(
+                                        $properties,
+                                        null,
+                                        $base_atomic_type->fallback_params,
+                                        false,
+                                        $base_atomic_type->from_docblock,
+                                    );
                                 }
-                                ksort($properties);
-                                $base_atomic_type = $base_atomic_type->setProperties($properties);
                             } else {
-                                // This should actually be a paradox
-                                $base_atomic_type = new TKeyedArray(
-                                    $properties,
-                                    null,
-                                    $base_atomic_type->fallback_params,
-                                    false,
-                                    $base_atomic_type->from_docblock,
-                                );
+                                $base_atomic_type = $base_atomic_type->setProperties($properties);
                             }
-                        } else {
-                            $base_atomic_type = $base_atomic_type->setProperties($properties);
                         }
+
+                        $new_base_type = $new_base_type->getBuilder()->addType($base_atomic_type)->freeze();
+
+                        $changed_var_ids[$base_key . '[' . $array_key . ']'] = true;
+
+                        if ($key_parts[count($key_parts) - 1] === ']') {
+                            self::adjustTKeyedArrayType(
+                                $key_parts,
+                                $existing_types,
+                                $changed_var_ids,
+                                $new_base_type,
+                            );
+                        }
+
+                        $existing_types[$base_key] = $new_base_type;
+                        break;
                     }
-
-                    $new_base_type = $new_base_type->getBuilder()->addType($base_atomic_type)->freeze();
-
-                    $changed_var_ids[$base_key . '[' . $array_key . ']'] = true;
-
-                    if ($key_parts[count($key_parts) - 1] === ']') {
-                        self::adjustTKeyedArrayType(
-                            $key_parts,
-                            $existing_types,
-                            $changed_var_ids,
-                            $new_base_type,
-                        );
-                    }
-
-                    $existing_types[$base_key] = $new_base_type;
-                    break;
                 }
             }
         }

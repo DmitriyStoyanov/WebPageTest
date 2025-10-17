@@ -100,7 +100,7 @@ class PlanList implements IteratorAggregate, Countable, JsonSerializable
         return count($this->list);
     }
 
-    public function jsonSerialize()
+    public function jsonSerialize(): array
     {
         return $this->list;
     }

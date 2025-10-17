@@ -107,7 +107,7 @@ class Plan implements JsonSerializable
         return false;
     }
 
-    public function jsonSerialize()
+    public function jsonSerialize(): array
     {
         return [
             'billingFrequency' => $this->original_billing_frequency,

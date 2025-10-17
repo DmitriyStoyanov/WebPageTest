@@ -36,7 +36,7 @@ use function strtolower;
 /**
  * @internal
  */
-class StaticCallAnalyzer extends CallAnalyzer
+final class StaticCallAnalyzer extends CallAnalyzer
 {
     public static function analyze(
         StatementsAnalyzer $statements_analyzer,
@@ -54,12 +54,10 @@ class StaticCallAnalyzer extends CallAnalyzer
         $config = $codebase->config;
 
         if ($stmt->class instanceof PhpParser\Node\Name) {
-            $fq_class_name = null;
-
-            if (count($stmt->class->parts) === 1
-                && in_array(strtolower($stmt->class->parts[0]), ['self', 'static', 'parent'], true)
+            if (count($stmt->class->getParts()) === 1
+                && in_array(strtolower($stmt->class->getFirst()), ['self', 'static', 'parent'], true)
             ) {
-                if ($stmt->class->parts[0] === 'parent') {
+                if ($stmt->class->getFirst() === 'parent') {
                     $child_fq_class_name = $context->self;
 
                     $class_storage = $child_fq_class_name
@@ -83,8 +81,30 @@ class StaticCallAnalyzer extends CallAnalyzer
                     $class_storage = $codebase->classlike_storage_provider->get($fq_class_name);
 
                     $fq_class_name = $class_storage->name;
+
+                    if ($context->collect_initializations
+                        && isset($stmt->name->name)
+                        && $stmt->name->name === '__construct'
+                        && isset($class_storage->declaring_method_ids['__construct'])) {
+                        $construct_fq_class_name = $class_storage->declaring_method_ids['__construct']->fq_class_name;
+                        $construct_class_storage = $codebase->classlike_storage_provider->get($construct_fq_class_name);
+                        $construct_fq_class_name = $construct_class_storage->name;
+
+                        foreach ($construct_class_storage->properties as $property_name => $property_storage) {
+                            if ($property_storage->is_promoted
+                                && isset($context->vars_in_scope['$this->' . $property_name])) {
+                                $context_type = $context->vars_in_scope['$this->' . $property_name];
+                                $context->vars_in_scope['$this->' . $property_name] = $context_type->setProperties(
+                                    [
+                                        'initialized_class' => $construct_fq_class_name,
+                                        'initialized' => true,
+                                    ],
+                                );
+                            }
+                        }
+                    }
                 } elseif ($context->self) {
-                    if ($stmt->class->parts[0] === 'static' && isset($context->vars_in_scope['$this'])) {
+                    if ($stmt->class->getFirst() === 'static' && isset($context->vars_in_scope['$this'])) {
                         $fq_class_name = (string) $context->vars_in_scope['$this'];
                         $lhs_type = $context->vars_in_scope['$this'];
                     } else {
@@ -93,7 +113,7 @@ class StaticCallAnalyzer extends CallAnalyzer
                 } else {
                     return !IssueBuffer::accepts(
                         new NonStaticSelfCall(
-                            'Cannot use ' . $stmt->class->parts[0] . ' outside class context',
+                            'Cannot use ' . $stmt->class->getFirst() . ' outside class context',
                             new CodeLocation($statements_analyzer->getSource(), $stmt),
                         ),
                         $statements_analyzer->getSuppressedIssues(),
@@ -103,7 +123,7 @@ class StaticCallAnalyzer extends CallAnalyzer
                 if ($context->isPhantomClass($fq_class_name)) {
                     return true;
                 }
-            } elseif ($context->check_classes) {
+            } else {
                 $aliases = $statements_analyzer->getAliases();
 
                 if ($context->calling_method_id
@@ -111,7 +131,7 @@ class StaticCallAnalyzer extends CallAnalyzer
                 ) {
                     $codebase->file_reference_provider->addMethodReferenceToClassMember(
                         $context->calling_method_id,
-                        'use:' . $stmt->class->parts[0] . ':' . md5($statements_analyzer->getFilePath()),
+                        'use:' . $stmt->class->getFirst() . ':' . md5($statements_analyzer->getFilePath()),
                         false,
                     );
                 }
@@ -153,6 +173,7 @@ class StaticCallAnalyzer extends CallAnalyzer
                             : null,
                         $statements_analyzer->getSuppressedIssues(),
                         new ClassLikeNameOptions(false, false, false, true),
+                        $context->check_classes,
                     );
                 }
 

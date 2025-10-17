@@ -4,19 +4,24 @@ namespace Psalm\Storage;
 
 use Psalm\Aliases;
 use Psalm\CodeLocation;
+use Psalm\Codebase;
+use Psalm\Config;
 use Psalm\Internal\Analyzer\ClassLikeAnalyzer;
 use Psalm\Internal\MethodIdentifier;
 use Psalm\Internal\Type\TypeAlias\ClassTypeAlias;
 use Psalm\Issue\CodeIssue;
+use Psalm\Issue\DeprecatedClass;
 use Psalm\Type\Atomic\TNamedObject;
 use Psalm\Type\Atomic\TTemplateParam;
 use Psalm\Type\Union;
 
 use function array_values;
+use function in_array;
 
 final class ClassLikeStorage implements HasAttributesInterface
 {
     use CustomMetadataTrait;
+    use UnserializeMemoryUsageSuppressionTrait;
 
     /**
      * @var array<string, ClassConstantStorage>
@@ -66,14 +71,14 @@ final class ClassLikeStorage implements HasAttributesInterface
     public $mixin_declaring_fqcln;
 
     /**
-     * @var bool
+     * @var ?bool
      */
-    public $sealed_properties = false;
+    public $sealed_properties = null;
 
     /**
-     * @var bool
+     * @var ?bool
      */
-    public $sealed_methods = false;
+    public $sealed_methods = null;
 
     /**
      * @var bool
@@ -314,6 +319,11 @@ final class ClassLikeStorage implements HasAttributesInterface
     public $appearing_property_ids = [];
 
     /**
+     * @var ?Union
+     */
+    public $inheritors = null;
+
+    /**
      * @var array<string, string>
      */
     public $inheritable_property_ids = [];
@@ -470,6 +480,8 @@ final class ClassLikeStorage implements HasAttributesInterface
 
     public bool $public_api = false;
 
+    public bool $readonly = false;
+
     public function __construct(string $name)
     {
         $this->name = $name;
@@ -481,6 +493,28 @@ final class ClassLikeStorage implements HasAttributesInterface
     public function getAttributeStorages(): array
     {
         return $this->attributes;
+    }
+
+    public function hasAttributeIncludingParents(
+        string $fq_class_name,
+        Codebase $codebase
+    ): bool {
+        if ($this->hasAttribute($fq_class_name)) {
+            return true;
+        }
+
+        foreach ($this->parent_classes as $parent_class) {
+            // skip missing dependencies
+            if (!$codebase->classlike_storage_provider->has($parent_class)) {
+                continue;
+            }
+            $parent_class_storage = $codebase->classlike_storage_provider->get($parent_class);
+            if ($parent_class_storage->hasAttribute($fq_class_name)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -497,5 +531,44 @@ final class ClassLikeStorage implements HasAttributesInterface
         }
 
         return $type_params;
+    }
+
+    public function hasSealedProperties(Config $config): bool
+    {
+        return $this->sealed_properties ?? $config->seal_all_properties;
+    }
+
+    public function hasSealedMethods(Config $config): bool
+    {
+        return $this->sealed_methods ?? $config->seal_all_methods;
+    }
+
+    private function hasAttribute(string $fq_class_name): bool
+    {
+        foreach ($this->attributes as $attribute) {
+            if ($fq_class_name === $attribute->fq_class_name) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    public function getSuppressedIssuesForTemplateExtendParams(): array
+    {
+        $allowed_issue_types = [
+            DeprecatedClass::getIssueType(),
+        ];
+        $suppressed_issues_for_template_extend_params = [];
+        foreach ($this->suppressed_issues as $offset => $suppressed_issue) {
+            if (!in_array($suppressed_issue, $allowed_issue_types, true)) {
+                continue;
+            }
+            $suppressed_issues_for_template_extend_params[$offset] = $suppressed_issue;
+        }
+        return $suppressed_issues_for_template_extend_params;
     }
 }

@@ -14,6 +14,20 @@ class EnterpriseCustomer
     private ?DateTime $billing_period_end_date;
     private ?int $remaining_runs;
     private ?DateTime $plan_renewal_date;
+    private ?string $customer_id;
+    private ?string $masked_credit_card;
+    private ?string $cc_last_four;
+    private ?string $credit_card_type;
+    private ?string $subscription_id;
+    private ?string $next_wpt_plan_id;
+    private ?float $subscription_price;
+    private ?string $wpt_plan_name;
+    private ?DateTime $next_billing_date;
+    private ?int $days_past_due;
+    private ?int $number_of_billing_cycles;
+    private ?string $cc_image_url;
+    private ?string $cc_expiration_date;
+    private ?int $billing_frequency;
 
     public function __construct(array $options)
     {

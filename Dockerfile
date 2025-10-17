@@ -1,4 +1,4 @@
-FROM php:7.4-apache
+FROM php:8.1-apache
 MAINTAINER iteratec WPT Team <wpt@iteratec.de>
 
 RUN chmod o+r /etc/resolv.conf

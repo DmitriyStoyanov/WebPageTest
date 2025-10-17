@@ -1,26 +1,24 @@
 <?php
 
 /*
- * This file is part of Respect/Validation.
- *
- * (c) Alexandre Gomes Gaigalas <alexandre@gaigalas.net>
- *
- * For the full copyright and license information, please view the LICENSE file
- * that was distributed with this source code.
+ * Copyright (c) Alexandre Gomes Gaigalas <alganet@gmail.com>
+ * SPDX-License-Identifier: MIT
  */
 
 declare(strict_types=1);
 
 namespace Respect\Validation\Rules;
 
+use function function_exists;
 use function is_string;
 use function json_decode;
 use function json_last_error;
+use function json_validate;
 
 use const JSON_ERROR_NONE;
 
 /**
- * @author Alexandre Gomes Gaigalas <alexandre@gaigalas.net>
+ * @author Alexandre Gomes Gaigalas <alganet@gmail.com>
  * @author Danilo Benevides <danilobenevides01@gmail.com>
  * @author Emmerson Siqueira <emmersonsiqueira@gmail.com>
  * @author Henrique Moody <henriquemoody@gmail.com>
@@ -28,12 +26,16 @@ use const JSON_ERROR_NONE;
 final class Json extends AbstractRule
 {
     /**
-     * {@inheritDoc}
+     * @deprecated Calling `validate()` directly from rules is deprecated. Please use {@see \Respect\Validation\Validator::isValid()} instead.
      */
     public function validate($input): bool
     {
         if (!is_string($input) || $input === '') {
             return false;
+        }
+
+        if (function_exists('json_validate')) {
+            return json_validate($input);
         }
 
         json_decode($input);

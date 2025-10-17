@@ -7,23 +7,25 @@ Psalm supports a wide range of docblock annotations.
 Psalm uses the following PHPDoc tags to understand your code:
 
 - [`@var`](https://docs.phpdoc.org/latest/guide/references/phpdoc/tags/var.html)
-  Used for specifying the types of properties and variables@
+  Used for specifying the types of properties and variables
 - [`@return`](https://docs.phpdoc.org/latest/guide/references/phpdoc/tags/return.html)
   Used for specifying the return types of functions, methods and closures
 - [`@param`](https://docs.phpdoc.org/latest/guide/references/phpdoc/tags/param.html)
   Used for specifying types of parameters passed to functions, methods and closures
 - [`@property`](https://docs.phpdoc.org/latest/guide/references/phpdoc/tags/property.html)
   Used to specify what properties can be accessed on an object that uses `__get` and `__set`
-- [`@property-read`](https://docs.phpdoc.org/latest/guide/references/phpdoc/tags/property-read.html)
+- [`@property-read`](https://docs.phpdoc.org/latest/guide/references/phpdoc/tags/property.html)
   Used to specify what properties can be read on object that uses `__get`
-- [`@property-write`](https://docs.phpdoc.org/latest/guide/references/phpdoc/tags/property-write.html)
+- [`@property-write`](https://docs.phpdoc.org/latest/guide/references/phpdoc/tags/property.html)
   Used to specify what properties can be written on object that uses `__set`
 - [`@method`](https://docs.phpdoc.org/latest/guide/references/phpdoc/tags/method.html)
   Used to specify which magic methods are available on object that uses `__call`.
 - [`@deprecated`](https://docs.phpdoc.org/latest/guide/references/phpdoc/tags/deprecated.html)
   Used to mark functions, methods, classes and interfaces as being deprecated
 - [`@internal`](https://docs.phpdoc.org/latest/guide/references/phpdoc/tags/internal.html)
-   used to mark classes, functions and properties that are internal to an application or library.
+   Used to mark classes, functions and properties that are internal to an application or library.
+- [`@mixin`](#mixins)
+    Used to tell Psalm that the current class proxies the methods and properties of the referenced class.
 
 ### Off-label usage of the `@var` tag
 
@@ -46,6 +48,49 @@ function bat(): string {
     return $_GET['bat'];
 }
 ```
+### @mixins
+
+Adding `@mixin` to a classes docblock tells Psalm that the class proxies will proxy the methods and properties of the referenced class.
+
+```php
+class A
+{
+    public string $a = 'A';
+ 
+    public function doA(): void
+    {
+    }
+}
+
+/**
+ * @mixin A
+ */
+class B
+{
+    public string $b = 'B';
+
+    public function doB(): void
+    {
+    }
+
+    public function __call($name, $arguments)
+    {
+        (new A())->$name(...$arguments);
+    }
+    
+    public function __get($name)
+    {
+        (new A())->$name;
+    }
+}
+
+$b = new B();
+$b->doB();
+$b->doA(); // works
+echo $b->b;
+echo $b->a; // works
+```
+
 
 ## Psalm-specific tags
 
@@ -157,9 +202,10 @@ takesFoo(getFoo());
 
 This provides the same, but for `false`. Psalm uses this internally for functions like `preg_replace`, which can return false if the given input has encoding errors, but where 99.9% of the time the function operates as expected.
 
-### `@psalm-seal-properties`
+### `@psalm-seal-properties`, `@psalm-no-seal-properties`
 
 If you have a magic property getter/setter, you can use `@psalm-seal-properties` to instruct Psalm to disallow getting and setting any properties not contained in a list of `@property` (or `@property-read`/`@property-write`) annotations.
+This is automatically enabled with the configuration option `sealAllProperties` and can be disabled for a class with `@psalm-no-seal-properties`
 
 ```php
 <?php
@@ -181,11 +227,35 @@ $a = new A();
 $a->bar = 5; // this call fails
 ```
 
+### `@psalm-seal-methods`, `@psalm-no-seal-methods`
+
+If you have a magic method caller, you can use `@psalm-seal-methods` to instruct Psalm to disallow calling any methods not contained in a list of `@method` annotations.
+This is automatically enabled with the configuration option `sealAllMethods` and can be disabled for a class with `@psalm-no-seal-methods`
+
+```php
+<?php
+/**
+ * @method foo(): string
+ * @psalm-seal-methods
+ */
+class A {
+     public function __call(string $name, array $args) {
+          if ($name === "foo") {
+               return "hello";
+          }
+     }
+ }
+
+$a = new A();
+$b = $a->bar(); // this call fails
+```
+
 ### `@psalm-internal`
 
-Used to mark a class, property or function as internal to a given namespace. Psalm treats this slightly differently to
-the PHPDoc `@internal` tag. For `@internal`, an issue is raised if the calling code is in a namespace completely
-unrelated to the namespace of the calling code, i.e. not sharing the first element of the namespace.
+Used to mark a class, property or function as internal to a given namespace or class or even method. 
+Psalm treats this slightly differently to the PHPDoc `@internal` tag. For `@internal`,
+an issue is raised if the calling code is in a namespace completely unrelated to the namespace of the calling code,
+i.e. not sharing the first element of the namespace.
 
 In contrast for `@psalm-internal`, the docblock line must specify a namespace. An issue is raised if the calling code
 is not within the given namespace.
@@ -203,7 +273,15 @@ namespace A\B {
 namespace A\B\C {
     class Bat {
         public function batBat(): void {
-            $a = new \A\B\Foo();  // this is fine
+            $a = new \A\B\Foo(); // this is fine
+        }
+    }
+}
+
+namespace A {
+    class B {
+        public function batBat(): void {
+            $a = new \A\B\Foo(); // this is fine
         }
     }
 }
@@ -211,7 +289,28 @@ namespace A\B\C {
 namespace A\C {
     class Bat {
         public function batBat(): void {
-            $a = new \A\B\Foo();  // error
+            $a = new \A\B\Foo(); // error
+        }
+    }
+}
+
+namespace X {
+    class Foo {        
+        /**
+         * @psalm-internal Y\Bat::batBat
+         */
+        public static function barBar(): void {
+        }
+    }
+}
+
+namespace Y {
+    class Bat {
+        public function batBat() : void {
+            \X\Foo::barBar(); // this is fine
+        }
+        public function fooFoo(): void {
+            \X\Foo::barBar(); // error
         }
     }
 }
@@ -446,7 +545,18 @@ $username = $_GET['username']; // prints something like "test.php:4 $username: m
 
 ```
 
-*Note*: it throws [special low-level issue](../running_psalm/issues/Trace.md), so you have to set errorLevel to 1, override it in config or invoke Psalm with `--show-info=true`.
+*Note*: it throws [special low-level issue](../running_psalm/issues/Trace.md).
+To see it, you can set the global `errorLevel` to 1, or invoke Psalm with
+`--show-info=true`, but both these solutions will probably result in a lot of
+output. Another solution is to selectively bump the error level of the issue,
+so that you only get one more error:
+
+```xml
+<!-- psalm.xml -->
+<issueHandlers>
+  <Trace errorLevel="error"/>
+</issueHandlers>
+```
 
 ### `@psalm-check-type`
 
@@ -596,7 +706,7 @@ class Foo
 }
 ```
 When Psalm encounters variable property, it treats all properties in given class as potentially referenced.
-With `@psalm-ignore-variable-property` annotation, this reference is ignored. 
+With `@psalm-ignore-variable-property` annotation, this reference is ignored.
 
 While `PossiblyUnusedProperty` would be emitted in both cases, using `@psalm-ignore-variable-property`
 would allow [Psalter](../manipulating_code/fixing.md) to delete `Foo::$bar`.
@@ -642,9 +752,9 @@ function (): Generator {
 ```
 This annotation supports only generic types, meaning that e.g. `@psalm-yield string` would be ignored.
 
-### `@psalm-api`
+### `@api`, `@psalm-api`
 
-Used to tell Psalm that a class is used, even if no references to it can be
+Used to tell Psalm that a class or method is used, even if no references to it can be
 found. Unused issues will be suppressed.
 
 For example, in frameworks, controllers are often invoked "magically" without
@@ -655,6 +765,22 @@ any explicit references to them in your code. You should mark these classes with
  * @psalm-api
  */
 class UnreferencedClass {}
+```
+
+### `@psalm-inheritors`
+
+Used to tell Psalm that a class can only be extended by a certain subset of classes.
+
+For example, 
+```php
+<?php
+/**
+ * @psalm-inheritors FooClass|BarClass
+ */
+class BaseClass {}
+class FooClass extends BaseClass {}
+class BarClass extends BaseClass {}
+class BazClass extends BaseClass {} // this is an error
 ```
 
 ## Type Syntax

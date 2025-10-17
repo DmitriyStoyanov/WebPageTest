@@ -7,6 +7,7 @@ use Psalm\CodeLocation;
 use Psalm\Codebase;
 use Psalm\Context;
 use Psalm\Internal\Analyzer\FunctionLikeAnalyzer;
+use Psalm\Internal\Analyzer\Statements\Expression\ArrayAnalyzer;
 use Psalm\Internal\Analyzer\Statements\Expression\Call\MethodCallAnalyzer;
 use Psalm\Internal\Analyzer\Statements\Expression\ExpressionIdentifier;
 use Psalm\Internal\Analyzer\Statements\ExpressionAnalyzer;
@@ -92,15 +93,13 @@ use function count;
 use function implode;
 use function in_array;
 use function is_int;
-use function is_numeric;
-use function preg_match;
 use function strlen;
 use function strtolower;
 
 /**
  * @internal
  */
-class ArrayFetchAnalyzer
+final class ArrayFetchAnalyzer
 {
     public static function analyze(
         StatementsAnalyzer $statements_analyzer,
@@ -120,12 +119,18 @@ class ArrayFetchAnalyzer
             $was_inside_unset = $context->inside_unset;
             $context->inside_unset = false;
 
+            $was_inside_isset = $context->inside_isset;
+            $context->inside_isset = false;
+
             if (ExpressionAnalyzer::analyze($statements_analyzer, $stmt->dim, $context) === false) {
+                $context->inside_isset = $was_inside_isset;
                 $context->inside_unset = $was_inside_unset;
                 $context->inside_general_use = $was_inside_general_use;
 
                 return false;
             }
+
+            $context->inside_isset = $was_inside_isset;
 
             $context->inside_unset = $was_inside_unset;
 
@@ -165,7 +170,7 @@ class ArrayFetchAnalyzer
 
         $codebase = $statements_analyzer->getCodebase();
 
-        if ($keyed_array_var_id
+        if ($keyed_array_var_id !== null
             && $context->hasVariable($keyed_array_var_id)
             && !$context->vars_in_scope[$keyed_array_var_id]->possibly_undefined
             && $stmt_var_type
@@ -244,6 +249,10 @@ class ArrayFetchAnalyzer
                 }
             }
 
+            if ($context->inside_isset && !$stmt_type->hasMixed()) {
+                $stmt_type = Type::combineUnionTypes($stmt_type, Type::getNull());
+            }
+
             $statements_analyzer->node_data->setType($stmt, $stmt_type);
 
             if ($context->inside_isset
@@ -298,7 +307,7 @@ class ArrayFetchAnalyzer
             }
         }
 
-        if ($keyed_array_var_id
+        if ($keyed_array_var_id !== null
             && $context->hasVariable($keyed_array_var_id)
             && (!($stmt_type = $statements_analyzer->node_data->getType($stmt)) || $stmt_type->isVanillaMixed())
         ) {
@@ -313,14 +322,18 @@ class ArrayFetchAnalyzer
                 && !$context->inside_unset
                 && ($stmt_var_type && !$stmt_var_type->hasMixed())
             ) {
-                IssueBuffer::maybeAdd(
+                if (IssueBuffer::accepts(
                     new PossiblyUndefinedArrayOffset(
                         'Possibly undefined array key ' . $keyed_array_var_id
                             . ' on ' . $stmt_var_type->getId(),
                         new CodeLocation($statements_analyzer->getSource(), $stmt),
                     ),
                     $statements_analyzer->getSuppressedIssues(),
-                );
+                )) {
+                    $stmt_type = $stmt_type->getBuilder()->addType(new TNull())->freeze();
+                }
+            } elseif ($stmt_type->possibly_undefined) {
+                $stmt_type = $stmt_type->getBuilder()->addType(new TNull())->freeze();
             }
 
             $stmt_type = $stmt_type->setPossiblyUndefined(false);
@@ -465,8 +478,8 @@ class ArrayFetchAnalyzer
         bool $in_assignment,
         ?string $extended_var_id,
         Context $context,
-        PhpParser\Node\Expr $assign_value = null,
-        Union $replacement_type = null
+        ?PhpParser\Node\Expr $assign_value = null,
+        ?Union $replacement_type = null
     ): Union {
         $offset_type = $offset_type_original->getBuilder();
 
@@ -480,8 +493,22 @@ class ArrayFetchAnalyzer
 
         $key_values = [];
 
+        if ($codebase->store_node_types
+            && !$context->collect_initializations
+            && !$context->collect_mutations
+        ) {
+            $codebase->analyzer->addNodeType(
+                $statements_analyzer->getFilePath(),
+                $stmt->var,
+                $array_type->getId(),
+            );
+        }
+
         if ($stmt->dim instanceof PhpParser\Node\Scalar\String_) {
-            $key_values[] = new TLiteralString($stmt->dim->value);
+            $value_type = Type::getAtomicStringFromLiteral($stmt->dim->value);
+            if ($value_type instanceof TLiteralString) {
+                $key_values[] = $value_type;
+            }
         } elseif ($stmt->dim instanceof PhpParser\Node\Scalar\LNumber) {
             $key_values[] = new TLiteralInt($stmt->dim->value);
         } elseif ($stmt->dim && ($stmt_dim_type = $statements_analyzer->node_data->getType($stmt->dim))) {
@@ -514,7 +541,7 @@ class ArrayFetchAnalyzer
 
             if ($in_assignment) {
                 $offset_type->removeType('null');
-                $offset_type->addType(new TLiteralString(''));
+                $offset_type->addType(Type::getAtomicStringFromLiteral(''));
             }
         }
 
@@ -534,7 +561,7 @@ class ArrayFetchAnalyzer
                 $offset_type->removeType('null');
 
                 if (!$offset_type->ignore_nullable_issues) {
-                    $offset_type->addType(new TLiteralString(''));
+                    $offset_type->addType(Type::getAtomicStringFromLiteral(''));
                 }
             }
         }
@@ -940,16 +967,25 @@ class ArrayFetchAnalyzer
             $found_match = false;
 
             foreach ($offset_type->getAtomicTypes() as $offset_type_part) {
-                if ($extended_var_id
-                    && $offset_type_part instanceof TLiteralString
-                    && isset(
-                        $context->vars_in_scope[
-                            $extended_var_id . '[\'' . $offset_type_part->value . '\']'
-                        ],
-                    )
-                    && !$context->vars_in_scope[
-                            $extended_var_id . '[\'' . $offset_type_part->value . '\']'
-                        ]->possibly_undefined
+                if ($extended_var_id === null
+                    || !($offset_type_part instanceof TLiteralString)) {
+                    continue;
+                }
+
+                $string_to_int = ArrayAnalyzer::getLiteralArrayKeyInt(
+                    $offset_type_part->value,
+                );
+
+                $literal_access = $string_to_int === false
+                    ? '\'' . $offset_type_part->value . '\''
+                    : $string_to_int;
+                if (isset(
+                    $context->vars_in_scope[
+                        $extended_var_id . '[' . $literal_access . ']'
+                    ],
+                ) && !$context->vars_in_scope[
+                        $extended_var_id . '[' . $literal_access . ']'
+                    ]->possibly_undefined
                 ) {
                     $found_match = true;
                     break;
@@ -979,8 +1015,9 @@ class ArrayFetchAnalyzer
 
         foreach ($offset_types as $key => $offset_type_part) {
             if ($offset_type_part instanceof TLiteralString) {
-                if (preg_match('/^(0|[1-9][0-9]*)$/', $offset_type_part->value)) {
-                    $offset_type->addType(new TLiteralInt((int) $offset_type_part->value));
+                $string_to_int = ArrayAnalyzer::getLiteralArrayKeyInt($offset_type_part->value);
+                if ($string_to_int !== false) {
+                    $offset_type->addType(new TLiteralInt($string_to_int));
                     $offset_type->removeType($key);
                 }
             } elseif ($offset_type_part instanceof TBool) {
@@ -1518,7 +1555,10 @@ class ArrayFetchAnalyzer
         if ($key_values) {
             $properties = $type->properties;
             foreach ($key_values as $key_value) {
-                if ($type->is_list && (!is_numeric($key_value->value) || $key_value->value < 0)) {
+                $string_to_int = ArrayAnalyzer::getLiteralArrayKeyInt($key_value->value);
+                $key_value = $string_to_int === false ? $key_value : new TLiteralInt($string_to_int);
+
+                if ($type->is_list && (!is_int($key_value->value) || $key_value->value < 0)) {
                     $expected_offset_types[] = $type->getGenericKeyType();
                     $has_valid_offset = false;
                 } elseif ((isset($properties[$key_value->value]) && !(
@@ -1734,8 +1774,12 @@ class ArrayFetchAnalyzer
         ?Union &$array_access_type,
         bool &$has_array_access
     ): void {
-        if (strtolower($type->value) === 'simplexmlelement') {
-            $call_array_access_type = new Union([new TNamedObject('SimpleXMLElement')]);
+        $codebase = $statements_analyzer->getCodebase();
+        if (strtolower($type->value) === 'simplexmlelement'
+            || ($codebase->classExists($type->value)
+                && $codebase->classExtendsOrImplements($type->value, 'SimpleXMLElement'))
+        ) {
+            $call_array_access_type = new Union([new TNull(), new TNamedObject('SimpleXMLElement')]);
         } elseif (strtolower($type->value) === 'domnodelist' && $stmt->dim) {
             $old_data_provider = $statements_analyzer->node_data;
 

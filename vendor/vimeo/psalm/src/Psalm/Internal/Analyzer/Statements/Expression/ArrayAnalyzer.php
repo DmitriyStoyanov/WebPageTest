@@ -33,7 +33,6 @@ use Psalm\Type\Atomic\TList;
 use Psalm\Type\Atomic\TLiteralClassString;
 use Psalm\Type\Atomic\TLiteralFloat;
 use Psalm\Type\Atomic\TLiteralInt;
-use Psalm\Type\Atomic\TLiteralString;
 use Psalm\Type\Atomic\TMixed;
 use Psalm\Type\Atomic\TNonEmptyArray;
 use Psalm\Type\Atomic\TObjectWithProperties;
@@ -45,16 +44,20 @@ use Psalm\Type\Union;
 use function array_merge;
 use function array_values;
 use function count;
+use function filter_var;
 use function in_array;
+use function is_int;
+use function is_numeric;
 use function is_string;
-use function preg_match;
+use function trim;
 
+use const FILTER_VALIDATE_INT;
 use const PHP_INT_MAX;
 
 /**
  * @internal
  */
-class ArrayAnalyzer
+final class ArrayAnalyzer
 {
     public static function analyze(
         StatementsAnalyzer $statements_analyzer,
@@ -238,6 +241,38 @@ class ArrayAnalyzer
         return true;
     }
 
+    /**
+     * @param string|int $literal_array_key
+     * @return false|int
+     * @psalm-assert-if-false !numeric $literal_array_key
+     */
+    public static function getLiteralArrayKeyInt(
+        $literal_array_key
+    ) {
+        if (is_int($literal_array_key)) {
+            return $literal_array_key;
+        }
+
+        if (!is_numeric($literal_array_key)) {
+            return false;
+        }
+
+        // PHP 8 values with whitespace after number are counted as numeric
+        // and filter_var treats them as such too
+        // ensures that '15 ' will stay '15 '
+        if (trim($literal_array_key) !== $literal_array_key) {
+            return false;
+        }
+
+        // '+5' will pass the filter_var check but won't be changed in keys
+        if ($literal_array_key[0] === '+') {
+            return false;
+        }
+
+        // e.g. 015 is numeric but won't be typecast as it's not a valid int
+        return filter_var($literal_array_key, FILTER_VALIDATE_INT);
+    }
+
     private static function analyzeArrayItem(
         StatementsAnalyzer $statements_analyzer,
         Context $context,
@@ -315,38 +350,48 @@ class ArrayAnalyzer
                 }
 
                 if ($item->key instanceof PhpParser\Node\Scalar\String_
-                    && preg_match('/^(0|[1-9][0-9]*)$/', $item->key->value)
-                    && (
-                        (int) $item->key->value < PHP_INT_MAX ||
-                        $item->key->value === (string) PHP_INT_MAX
-                    )
+                    && self::getLiteralArrayKeyInt($item->key->value) !== false
                 ) {
                     $key_type = Type::getInt(false, (int) $item->key->value);
                 }
 
                 if ($key_type->isSingleStringLiteral()) {
                     $item_key_literal_type = $key_type->getSingleStringLiteral();
-                    $item_key_value = $item_key_literal_type->value;
+                    $string_to_int = self::getLiteralArrayKeyInt($item_key_literal_type->value);
+                    $item_key_value = $string_to_int === false ? $item_key_literal_type->value : $string_to_int;
 
-                    if ($item_key_literal_type instanceof TLiteralClassString) {
+                    if (is_string($item_key_value) && $item_key_literal_type instanceof TLiteralClassString) {
                         $array_creation_info->class_strings[$item_key_value] = true;
                     }
                 } elseif ($key_type->isSingleIntLiteral()) {
                     $item_key_value = $key_type->getSingleIntLiteral()->value;
 
-                    if ($item_key_value >= $array_creation_info->int_offset) {
-                        if ($item_key_value === $array_creation_info->int_offset) {
+                    if ($item_key_value <= PHP_INT_MAX
+                        && $item_key_value > $array_creation_info->int_offset
+                    ) {
+                        if ($item_key_value - 1 === $array_creation_info->int_offset) {
                             $item_is_list_item = true;
                         }
-                        $array_creation_info->int_offset = $item_key_value + 1;
+                        $array_creation_info->int_offset = $item_key_value;
                     }
                 }
             } else {
                 $key_type = Type::getArrayKey();
             }
         } else {
+            if ($array_creation_info->int_offset === PHP_INT_MAX) {
+                IssueBuffer::maybeAdd(
+                    new InvalidArrayOffset(
+                        'Cannot add an item with an offset beyond PHP_INT_MAX',
+                        new CodeLocation($statements_analyzer->getSource(), $item),
+                    ),
+                );
+                return;
+            }
+
             $item_is_list_item = true;
-            $item_key_value = $array_creation_info->int_offset++;
+            $item_key_value = ++$array_creation_info->int_offset;
+
             $key_atomic_type = new TLiteralInt($item_key_value);
             $array_creation_info->item_key_atomic_types[] = $key_atomic_type;
             $key_type = new Union([$key_atomic_type]);
@@ -371,7 +416,6 @@ class ArrayAnalyzer
 
             $array_creation_info->array_keys[$item_key_value] = true;
         }
-
 
         if (($data_flow_graph = $statements_analyzer->data_flow_graph)
             && ($data_flow_graph instanceof VariableUseGraph
@@ -536,10 +580,20 @@ class ArrayAnalyzer
                             continue 2;
                         }
                         $new_offset = $key;
-                        $array_creation_info->item_key_atomic_types[] = new TLiteralString($new_offset);
+                        $array_creation_info->item_key_atomic_types[] = Type::getAtomicStringFromLiteral($new_offset);
                         $array_creation_info->all_list = false;
                     } else {
-                        $new_offset = $array_creation_info->int_offset++;
+                        if ($array_creation_info->int_offset === PHP_INT_MAX) {
+                            IssueBuffer::maybeAdd(
+                                new InvalidArrayOffset(
+                                    'Cannot add an item with an offset beyond PHP_INT_MAX',
+                                    new CodeLocation($statements_analyzer->getSource(), $item->value),
+                                ),
+                                $statements_analyzer->getSuppressedIssues(),
+                            );
+                            continue 2;
+                        }
+                        $new_offset = ++$array_creation_info->int_offset;
                         $array_creation_info->item_key_atomic_types[] = new TLiteralInt($new_offset);
                     }
 

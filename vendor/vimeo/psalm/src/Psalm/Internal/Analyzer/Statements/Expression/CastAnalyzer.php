@@ -28,6 +28,7 @@ use Psalm\Type\Atomic\TClosedResource;
 use Psalm\Type\Atomic\TFalse;
 use Psalm\Type\Atomic\TFloat;
 use Psalm\Type\Atomic\TInt;
+use Psalm\Type\Atomic\TIntRange;
 use Psalm\Type\Atomic\TKeyedArray;
 use Psalm\Type\Atomic\TList;
 use Psalm\Type\Atomic\TLiteralFloat;
@@ -53,12 +54,13 @@ use function array_merge;
 use function array_pop;
 use function array_values;
 use function get_class;
+use function range;
 use function strtolower;
 
 /**
  * @internal
  */
-class CastAnalyzer
+final class CastAnalyzer
 {
     /** @var string[] */
     private const PSEUDO_CASTABLE_CLASSES = [
@@ -485,7 +487,7 @@ class CastAnalyzer
             // todo: emit error here
         }
 
-        $valid_types = array_merge($valid_ints, $castable_types);
+        $valid_types = [...$valid_ints, ...$castable_types];
 
         if (!$valid_types) {
             $int_type = Type::getInt();
@@ -533,6 +535,18 @@ class CastAnalyzer
 
             if ($atomic_type instanceof TFloat) {
                 $valid_floats[] = $atomic_type;
+
+                continue;
+            }
+
+            if ($atomic_type instanceof TIntRange
+                && $atomic_type->min_bound !== null
+                && $atomic_type->max_bound !== null
+                && ($atomic_type->max_bound - $atomic_type->min_bound) < 500
+            ) {
+                foreach (range($atomic_type->min_bound, $atomic_type->max_bound) as $literal_int_value) {
+                    $valid_floats[] = new TLiteralFloat((float) $literal_int_value);
+                }
 
                 continue;
             }
@@ -674,7 +688,7 @@ class CastAnalyzer
             // todo: emit error here
         }
 
-        $valid_types = array_merge($valid_floats, $castable_types);
+        $valid_types = [...$valid_floats, ...$castable_types];
 
         if (!$valid_types) {
             $float_type = Type::getFloat();
@@ -721,9 +735,17 @@ class CastAnalyzer
                 || $atomic_type instanceof TNumeric
             ) {
                 if ($atomic_type instanceof TLiteralInt || $atomic_type instanceof TLiteralFloat) {
-                    $castable_types[] = new TLiteralString((string) $atomic_type->value);
+                    $valid_strings[] = Type::getAtomicStringFromLiteral((string) $atomic_type->value);
                 } elseif ($atomic_type instanceof TNonspecificLiteralInt) {
                     $castable_types[] = new TNonspecificLiteralString();
+                } elseif ($atomic_type instanceof TIntRange
+                    && $atomic_type->min_bound !== null
+                    && $atomic_type->max_bound !== null
+                    && ($atomic_type->max_bound - $atomic_type->min_bound) < 500
+                ) {
+                    foreach (range($atomic_type->min_bound, $atomic_type->max_bound) as $literal_int_value) {
+                        $valid_strings[] = Type::getAtomicStringFromLiteral((string) $literal_int_value);
+                    }
                 } else {
                     $castable_types[] = new TNumericString();
                 }
@@ -740,20 +762,20 @@ class CastAnalyzer
             if ($atomic_type instanceof TNull
                 || $atomic_type instanceof TFalse
             ) {
-                $valid_strings[] = new TLiteralString('');
+                $valid_strings[] = Type::getAtomicStringFromLiteral('');
                 continue;
             }
 
             if ($atomic_type instanceof TTrue
             ) {
-                $valid_strings[] = new TLiteralString('1');
+                $valid_strings[] = Type::getAtomicStringFromLiteral('1');
                 continue;
             }
 
             if ($atomic_type instanceof TBool
             ) {
-                $valid_strings[] = new TLiteralString('1');
-                $valid_strings[] = new TLiteralString('');
+                $valid_strings[] = Type::getAtomicStringFromLiteral('1');
+                $valid_strings[] = Type::getAtomicStringFromLiteral('');
                 continue;
             }
 
@@ -817,10 +839,7 @@ class CastAnalyzer
                                 $parent_nodes = array_merge($return_type->parent_nodes, $parent_nodes);
                             }
 
-                            $castable_types = array_merge(
-                                $castable_types,
-                                array_values($return_type->getAtomicTypes()),
-                            );
+                            $castable_types = [...$castable_types, ...array_values($return_type->getAtomicTypes())];
 
                             continue 2;
                         }

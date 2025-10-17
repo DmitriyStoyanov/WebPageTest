@@ -13,7 +13,6 @@ use Psalm\Internal\CliUtils;
 use Psalm\Internal\Codebase\ReferenceMapGenerator;
 use Psalm\Internal\Composer;
 use Psalm\Internal\ErrorHandler;
-use Psalm\Internal\Fork\Pool;
 use Psalm\Internal\Fork\PsalmRestarter;
 use Psalm\Internal\IncludeCollector;
 use Psalm\Internal\Provider\ClassLikeStorageCacheProvider;
@@ -32,11 +31,13 @@ use Psalm\Progress\Progress;
 use Psalm\Progress\VoidProgress;
 use Psalm\Report;
 use Psalm\Report\ReportOptions;
+use ReflectionClass;
 use RuntimeException;
 use Symfony\Component\Filesystem\Path;
 
 use function array_filter;
 use function array_key_exists;
+use function array_keys;
 use function array_map;
 use function array_merge;
 use function array_slice;
@@ -44,8 +45,10 @@ use function array_sum;
 use function array_values;
 use function chdir;
 use function count;
+use function extension_loaded;
 use function file_exists;
 use function file_put_contents;
+use function function_exists;
 use function fwrite;
 use function gc_collect_cycles;
 use function gc_disable;
@@ -55,10 +58,8 @@ use function getopt;
 use function implode;
 use function in_array;
 use function ini_get;
-use function ini_set;
 use function is_array;
 use function is_numeric;
-use function is_scalar;
 use function is_string;
 use function json_encode;
 use function max;
@@ -68,20 +69,19 @@ use function preg_match;
 use function preg_replace;
 use function realpath;
 use function setlocale;
+use function sort;
 use function str_repeat;
 use function str_replace;
 use function strlen;
 use function strpos;
 use function substr;
-use function version_compare;
+use function wordwrap;
 
 use const DIRECTORY_SEPARATOR;
 use const JSON_THROW_ON_ERROR;
 use const LC_CTYPE;
 use const PHP_EOL;
-use const PHP_OS;
 use const PHP_URL_SCHEME;
-use const PHP_VERSION;
 use const STDERR;
 
 // phpcs:disable PSR1.Files.SideEffects
@@ -91,6 +91,7 @@ require_once __DIR__ . '/../CliUtils.php';
 require_once __DIR__ . '/../Composer.php';
 require_once __DIR__ . '/../IncludeCollector.php';
 require_once __DIR__ . '/../../IssueBuffer.php';
+require_once __DIR__ . '/../../Report.php';
 
 /**
  * @internal
@@ -166,6 +167,7 @@ final class Psalm
 
     /**
      * @param array<int,string> $argv
+     * @psalm-suppress ComplexMethod Maybe some of the option handling could be moved to its own function...
      */
     public static function run(array $argv): void
     {
@@ -183,11 +185,19 @@ final class Psalm
             throw new RuntimeException('Failed to parse CLI options');
         }
 
+        // debug CI environment
+        if (!array_key_exists('debug', $options)
+            && 'true' === getenv('GITHUB_ACTIONS')
+            && '1' === getenv('RUNNER_DEBUG')
+        ) {
+            $options['debug'] = false;
+        }
+
         self::forwardCliCall($options, $argv);
 
         self::validateCliArguments($args);
 
-        self::setMemoryLimit($options);
+        CliUtils::setMemoryLimit($options);
 
         self::syncShortOptions($options);
 
@@ -221,7 +231,7 @@ final class Psalm
             // we ignore the FQN because of a hack in scoper.inc that needs full path
             // phpcs:ignore SlevomatCodingStandard.Namespaces.ReferenceUsedNamesOnly.ReferenceViaFullyQualifiedName
             static fn(): ?\Composer\Autoload\ClassLoader =>
-                CliUtils::requireAutoloaders($current_dir, isset($options['r']), $vendor_dir)
+                CliUtils::requireAutoloaders($current_dir, isset($options['r']), $vendor_dir),
         );
 
         $run_taint_analysis = self::shouldRunTaintAnalysis($options);
@@ -258,9 +268,9 @@ final class Psalm
 
         $threads = self::detectThreads($options, $config, $in_ci);
 
-        self::emitMacPcreWarning($options, $threads);
+        $progress = self::initProgress($options, $config);
 
-        self::restart($options, $threads);
+        self::restart($options, $threads, $progress);
 
         if (isset($options['debug-emitted-issues'])) {
             $config->debug_emitted_issues = true;
@@ -271,7 +281,8 @@ final class Psalm
 
         if (isset($options['set-baseline'])) {
             if (is_array($options['set-baseline'])) {
-                die('Only one baseline file can be created at a time' . PHP_EOL);
+                fwrite(STDERR, 'Only one baseline file can be created at a time' . PHP_EOL);
+                exit(1);
             }
         }
 
@@ -317,7 +328,6 @@ final class Psalm
             self::clearGlobalCache($config);
         }
 
-        $progress = self::initProgress($options, $config);
         $providers = self::initProviders($options, $config, $current_dir);
 
         $stdout_report_options = self::initStdoutReportOptions($options, $show_info, $output_format, $in_ci);
@@ -391,7 +401,7 @@ final class Psalm
                 !$paths_to_check,
                 $start_time,
                 isset($options['stats']),
-                self::initBaseline($options, $config, $current_dir, $path_to_config),
+                self::initBaseline($options, $config, $current_dir, $path_to_config, $paths_to_check),
             );
         } else {
             self::autoGenerateConfig($project_analyzer, $current_dir, $init_source_dir, $vendor_dir);
@@ -402,7 +412,24 @@ final class Psalm
     {
         return isset($options['output-format']) && is_string($options['output-format'])
             ? $options['output-format']
-            : Report::TYPE_CONSOLE;
+            : self::findDefaultOutputFormat();
+    }
+
+    /**
+     * @return Report::TYPE_*
+     */
+    private static function findDefaultOutputFormat(): string
+    {
+        $emulator = getenv('TERMINAL_EMULATOR');
+        if (is_string($emulator) && substr($emulator, 0, 9) === 'JetBrains') {
+            return Report::TYPE_PHP_STORM;
+        }
+
+        if ('true' === getenv('GITHUB_ACTIONS')) {
+            return Report::TYPE_GITHUB_ACTIONS;
+        }
+
+        return Report::TYPE_CONSOLE;
     }
 
     private static function initShowInfo(array $options): bool
@@ -460,35 +487,13 @@ final class Psalm
     }
 
     /**
-     * @param array<string,string|false|list<mixed>> $options
-     */
-    private static function setMemoryLimit(array $options): void
-    {
-        if (!array_key_exists('use-ini-defaults', $options)) {
-            ini_set('display_errors', 'stderr');
-            ini_set('display_startup_errors', '1');
-
-            $memoryLimit = (8 * 1_024 * 1_024 * 1_024);
-
-            if (array_key_exists('memory-limit', $options)) {
-                $memoryLimit = $options['memory-limit'];
-
-                if (!is_scalar($memoryLimit)) {
-                    throw new ConfigException('Invalid memory limit specified.');
-                }
-            }
-
-            ini_set('memory_limit', (string) $memoryLimit);
-        }
-    }
-
-    /**
      * @param array<int, string> $args
      */
     private static function generateConfig(string $current_dir, array &$args): void
     {
-        if (file_exists($current_dir . 'psalm.xml')) {
-            die('A config file already exists in the current directory' . PHP_EOL);
+        if (file_exists($current_dir . DIRECTORY_SEPARATOR . 'psalm.xml')) {
+            fwrite(STDERR, 'A config file already exists in the current directory' . PHP_EOL);
+            exit(1);
         }
 
         $args = array_values(array_filter(
@@ -502,19 +507,21 @@ final class Psalm
                 && $arg !== '--debug-emitted-issues'
                 && strpos($arg, '--disable-extension=') !== 0
                 && strpos($arg, '--root=') !== 0
-                && strpos($arg, '--r=') !== 0
+                && strpos($arg, '--r=') !== 0,
         ));
 
         $init_level = null;
         $init_source_dir = null;
         if (count($args)) {
             if (count($args) > 2) {
-                die('Too many arguments provided for psalm --init' . PHP_EOL);
+                fwrite(STDERR, 'Too many arguments provided for psalm --init' . PHP_EOL);
+                exit(1);
             }
 
             if (isset($args[1])) {
                 if (!preg_match('/^[1-8]$/', $args[1])) {
-                    die('Config strictness must be a number between 1 and 8 inclusive' . PHP_EOL);
+                    fwrite(STDERR, 'Config strictness must be a number between 1 and 8 inclusive' . PHP_EOL);
+                    exit(1);
                 }
 
                 $init_level = (int)$args[1];
@@ -534,11 +541,13 @@ final class Psalm
                     $vendor_dir,
                 );
             } catch (ConfigCreationException $e) {
-                die($e->getMessage() . PHP_EOL);
+                fwrite(STDERR, $e->getMessage() . PHP_EOL);
+                exit(1);
             }
 
-            if (!file_put_contents($current_dir . 'psalm.xml', $template_contents)) {
-                die('Could not write to psalm.xml' . PHP_EOL);
+            if (file_put_contents($current_dir . DIRECTORY_SEPARATOR . 'psalm.xml', $template_contents) === false) {
+                fwrite(STDERR, 'Could not write to psalm.xml' . PHP_EOL);
+                exit(1);
             }
 
             exit('Config file created successfully. Please re-run psalm.' . PHP_EOL);
@@ -683,7 +692,8 @@ final class Psalm
         $baselineFile = $config->error_baseline;
 
         if (empty($baselineFile)) {
-            die('Cannot update baseline, because no baseline file is configured.' . PHP_EOL);
+            fwrite(STDERR, 'Cannot update baseline, because no baseline file is configured.' . PHP_EOL);
+            exit(1);
         }
 
         try {
@@ -778,11 +788,13 @@ final class Psalm
                 $vendor_dir,
             );
         } catch (ConfigCreationException $e) {
-            die($e->getMessage() . PHP_EOL);
+            fwrite(STDERR, $e->getMessage() . PHP_EOL);
+            exit(1);
         }
 
-        if (!file_put_contents($current_dir . 'psalm.xml', $template_contents)) {
-            die('Could not write to psalm.xml' . PHP_EOL);
+        if (file_put_contents($current_dir . DIRECTORY_SEPARATOR . 'psalm.xml', $template_contents) === false) {
+            fwrite(STDERR, 'Could not write to psalm.xml' . PHP_EOL);
+            exit(1);
         }
 
         exit('Config file created successfully. Please re-run psalm.' . PHP_EOL);
@@ -842,12 +854,12 @@ final class Psalm
             exit(1);
         }
 
-        $current_dir = $cwd . DIRECTORY_SEPARATOR;
+        $current_dir = $cwd;
 
         if (isset($options['r']) && is_string($options['r'])) {
             $root_path = realpath($options['r']);
 
-            if (!$root_path) {
+            if ($root_path === false) {
                 fwrite(
                     STDERR,
                     'Could not locate root directory ' . $current_dir . DIRECTORY_SEPARATOR . $options['r'] . PHP_EOL,
@@ -855,31 +867,13 @@ final class Psalm
                 exit(1);
             }
 
-            $current_dir = $root_path . DIRECTORY_SEPARATOR;
+            $current_dir = $root_path;
         }
 
         return $current_dir;
     }
 
-    private static function emitMacPcreWarning(array $options, int $threads): void
-    {
-        if (!isset($options['threads'])
-            && !isset($options['debug'])
-            && $threads === 1
-            && ini_get('pcre.jit') === '1'
-            && PHP_OS === 'Darwin'
-            && version_compare(PHP_VERSION, '7.3.0') >= 0
-            && version_compare(PHP_VERSION, '7.4.0') < 0
-        ) {
-            echo(
-                'If you want to run Psalm as a language server, or run Psalm with' . PHP_EOL
-                    . 'multiple processes (--threads=4), beware:' . PHP_EOL
-                    . Pool::MAC_PCRE_MESSAGE . PHP_EOL . PHP_EOL
-            );
-        }
-    }
-
-    private static function restart(array $options, int $threads): void
+    private static function restart(array $options, int $threads, Progress $progress): void
     {
         $ini_handler = new PsalmRestarter('PSALM');
 
@@ -896,14 +890,34 @@ final class Psalm
             }
         }
 
-        if ($threads > 1) {
+        if ($threads > 1
+            && extension_loaded('grpc')
+            && (ini_get('grpc.enable_fork_support') === '1' && ini_get('grpc.poll_strategy') === 'epoll1') === false
+        ) {
             $ini_handler->disableExtension('grpc');
+
+            $progress->warning(PHP_EOL
+                . 'grpc extension has been disabled. '
+                . 'Set grpc.enable_fork_support = 1 and grpc.poll_strategy = epoll1 in php.ini to enable it. '
+                . 'See https://github.com/grpc/grpc/issues/20250#issuecomment-531321945 for more information.'
+                . PHP_EOL . PHP_EOL);
         }
 
-        $ini_handler->disableExtension('uopz');
+        $ini_handler->disableExtensions([
+            'uopz',
+            // extesions that are incompatible with JIT (they are also usually make Psalm slow)
+            'pcov',
+            'blackfire',
+        ]);
 
         // If Xdebug is enabled, restart without it
         $ini_handler->check();
+
+        if (!function_exists('opcache_get_status')) {
+            $progress->write(PHP_EOL
+                . 'Install the opcache extension to make use of JIT on PHP 8.0+ for a 20%+ performance boost!'
+                . PHP_EOL . PHP_EOL);
+        }
     }
 
     private static function detectThreads(array $options, Config $config, bool $in_ci): int
@@ -1012,17 +1026,23 @@ final class Psalm
     }
 
     /**
+     * @param ?list<string> $paths_to_check
      * @return array<string,array<string,array{o:int, s: list<string>}>>
      */
     private static function initBaseline(
         array $options,
         Config $config,
         string $current_dir,
-        ?string $path_to_config
+        ?string $path_to_config,
+        ?array $paths_to_check
     ): array {
         $issue_baseline = [];
 
         if (isset($options['set-baseline']) && is_string($options['set-baseline'])) {
+            if ($paths_to_check !== null) {
+                fwrite(STDERR, PHP_EOL . 'Cannot generate baseline when checking specific files' . PHP_EOL);
+                exit(1);
+            }
             $issue_baseline = self::generateBaseline($options, $config, $current_dir, $path_to_config);
         }
 
@@ -1039,6 +1059,10 @@ final class Psalm
         }
 
         if (isset($options['update-baseline'])) {
+            if ($paths_to_check !== null) {
+                fwrite(STDERR, PHP_EOL . 'Cannot update baseline when checking specific files' . PHP_EOL);
+                exit(1);
+            }
             $issue_baseline = self::updateBaseline($options, $config);
         }
 
@@ -1052,6 +1076,18 @@ final class Psalm
                 fwrite(STDERR, 'Error while reading baseline: ' . $exception->getMessage() . PHP_EOL);
                 exit(1);
             }
+        }
+
+        if ($paths_to_check !== null) {
+            $filtered_issue_baseline = [];
+            foreach ($paths_to_check as $path_to_check) {
+                // +1 to remove the initial slash from $path_to_check
+                $path_to_check = substr($path_to_check, strlen($config->base_dir) + 1);
+                if (isset($issue_baseline[$path_to_check])) {
+                    $filtered_issue_baseline[$path_to_check] = $issue_baseline[$path_to_check];
+                }
+            }
+            $issue_baseline = $filtered_issue_baseline;
         }
 
         return $issue_baseline;
@@ -1087,9 +1123,7 @@ final class Psalm
             } else {
                 $find_unused_code = 'auto';
             }
-        }
-
-        if ($config->find_unused_code) {
+        } elseif ($config->find_unused_code) {
             $find_unused_code = 'auto';
         }
 
@@ -1155,7 +1189,7 @@ final class Psalm
         if (is_string(getenv('PSALM_SHEPHERD_HOST'))) { // remove this block in Psalm 6
             fwrite(
                 STDERR,
-                'PSALM_SHEPHERD_HOST env variable is deprecated and will be removed in Psalm 6.'
+                'Warning: PSALM_SHEPHERD_HOST env variable will be removed in Psalm 6.'
                 .' Please use "--shepherd" cli option or PSALM_SHEPHERD env variable'
                 .' to specify a custom Shepherd host/endpoint.'
                 . PHP_EOL,
@@ -1221,6 +1255,21 @@ final class Psalm
      */
     private static function getHelpText(): string
     {
+        $formats = [];
+        /** @var string $value */
+        foreach ((new ReflectionClass(Report::class))->getConstants() as $constant => $value) {
+            if (strpos($constant, 'TYPE_') === 0) {
+                $formats[] = $value;
+            }
+        }
+        sort($formats);
+        $outputFormats = wordwrap(implode(', ', $formats), 75, "\n            ");
+
+        /** @psalm-suppress ImpureMethodCall */
+        $reports = array_keys(Report::getMapping());
+        sort($reports);
+        $reportFormats = wordwrap('"' . implode('", "', $reports) . '"', 75, "\n        ");
+
         return <<<HELP
         Usage:
             psalm [options] [file...]
@@ -1246,6 +1295,9 @@ final class Psalm
 
             --php-version=PHP_VERSION
                 Explicitly set PHP version to analyse code against.
+
+            --error-level=ERROR_LEVEL
+                Set the error reporting level
 
         Surfacing issues:
             --show-info[=BOOLEAN]
@@ -1301,8 +1353,8 @@ final class Psalm
 
             --output-format=console
                 Changes the output format.
-                Available formats: compact, console, text, emacs, json, pylint, xml, checkstyle, junit, sonarqube,
-                                   github, phpstorm, codeclimate, by-issue-level
+                Available formats:
+                    $outputFormats
 
             --no-progress
                 Disable the progress indicator
@@ -1316,8 +1368,7 @@ final class Psalm
         Reports:
             --report=PATH
                 The path where to output report file. The output format is based on the file extension.
-                (Currently supported formats: ".json", ".xml", ".txt", ".emacs", ".pylint", ".console",
-                ".sarif", "checkstyle.xml", "sonarqube.json", "codeclimate.json", "summary.json", "junit.xml")
+                (Currently supported formats: $reportFormats)
 
             --report-show-info[=BOOLEAN]
                 Whether the report should include non-errors in its output (defaults to true)

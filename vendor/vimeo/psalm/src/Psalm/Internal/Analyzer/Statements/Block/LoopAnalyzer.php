@@ -28,7 +28,7 @@ use function spl_object_id;
 /**
  * @internal
  */
-class LoopAnalyzer
+final class LoopAnalyzer
 {
     /**
      * Checks an array of statements in a loop
@@ -44,7 +44,7 @@ class LoopAnalyzer
         array $pre_conditions,
         array $post_expressions,
         LoopScope $loop_scope,
-        Context &$continue_context = null,
+        ?Context &$continue_context = null,
         bool $is_do = false,
         bool $always_enters_loop = false
     ): ?bool {
@@ -108,11 +108,6 @@ class LoopAnalyzer
 
         if ($assignment_depth === 0 || $does_always_break) {
             $continue_context = clone $loop_context;
-
-            foreach ($continue_context->vars_in_scope as $context_var_id => $context_type) {
-                $continue_context->vars_in_scope[$context_var_id] = $context_type;
-            }
-
             $continue_context->loop_scope = $loop_scope;
 
             foreach ($pre_conditions as $condition_offset => $pre_condition) {
