@@ -401,6 +401,9 @@ function _GetMapOrImage($rows, $url, $page_events, $options, $is_image_map, $pag
     } else {
         // Draw items needed if we're ACTUALLY drawing the chart.
         $im = imagecreatetruecolor($width, $height);
+        if ($im === false) {
+            return null;
+        }
 
         // Allocate the colors we will need.
         $white = GetColor($im, 255, 255, 255);
